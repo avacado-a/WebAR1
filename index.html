@@ -32,7 +32,7 @@
         <!-- Header & Instructions -->
         <div class="bg-black/60 backdrop-blur-md text-white p-4 rounded-2xl shadow-lg border border-white/20 pointer-events-auto">
             <h1 class="text-xl font-bold mb-1">AR Measure PRO</h1>
-            <p id="instructions" class="text-sm text-gray-200 mb-2">Move phone slowly to build 3D mesh...</p>
+            <p id="instructions" class="text-sm text-gray-200 mb-2">Move phone slowly to scan surfaces...</p>
             
             <!-- Live Distance to Camera -->
             <div id="live-dist-container" class="text-xs bg-blue-900/50 border border-blue-400/30 p-2 rounded-lg hidden transition-opacity">
@@ -79,8 +79,9 @@
         const worldMeshes = new Map();
         
         // Materials for environment visualization
-        const planeMaterial = new THREE.LineBasicMaterial({ color: 0x00ff00, transparent: true, opacity: 0.5 });
-        const meshMaterial = new THREE.MeshBasicMaterial({ color: 0x00ffff, wireframe: true, transparent: true, opacity: 0.15 });
+        // Changed planes to a subtle solid surface, and made meshes highly visible
+        const planeMaterial = new THREE.MeshBasicMaterial({ color: 0x00ff00, transparent: true, opacity: 0.15, side: THREE.DoubleSide });
+        const meshMaterial = new THREE.MeshBasicMaterial({ color: 0x00ffff, wireframe: true, transparent: true, opacity: 0.8, side: THREE.DoubleSide });
 
         const uiOverlay = document.getElementById('overlay');
         const instructionsText = document.getElementById('instructions');
@@ -244,23 +245,37 @@
         }
 
         function updateEnvironmentVisualization(frame, referenceSpace) {
-            // Visualize Planes (if supported)
+            // Visualize Planes as solid, subtle green surfaces
             if (frame.detectedPlanes) {
                 frame.detectedPlanes.forEach(plane => {
-                    let planeLine = planeMeshes.get(plane);
-                    if (!planeLine) {
+                    let planeMesh = planeMeshes.get(plane);
+                    if (!planeMesh) {
                         const geometry = new THREE.BufferGeometry();
-                        planeLine = new THREE.LineLoop(geometry, planeMaterial);
-                        scene.add(planeLine);
-                        planeMeshes.set(plane, planeLine);
+                        planeMesh = new THREE.Mesh(geometry, planeMaterial);
+                        scene.add(planeMesh);
+                        planeMeshes.set(plane, planeMesh);
                     }
                     const pose = frame.getPose(plane.planeSpace, referenceSpace);
                     if (pose) {
-                        planeLine.matrix.fromArray(pose.transform.matrix);
-                        planeLine.matrixAutoUpdate = false;
+                        planeMesh.matrix.fromArray(pose.transform.matrix);
+                        planeMesh.matrixAutoUpdate = false;
+                        
+                        // Triangulate the plane polygon into a solid shape
                         const vertices = [];
-                        plane.polygon.forEach(point => vertices.push(point.x, point.y, point.z));
-                        planeLine.geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+                        const center = { x: 0, y: 0, z: 0 };
+                        if (plane.polygon.length > 0) {
+                            plane.polygon.forEach(p => { center.x += p.x; center.y += p.y; center.z += p.z; });
+                            center.x /= plane.polygon.length; center.y /= plane.polygon.length; center.z /= plane.polygon.length;
+                            
+                            for (let i = 0; i < plane.polygon.length; i++) {
+                                const p1 = plane.polygon[i];
+                                const p2 = plane.polygon[(i + 1) % plane.polygon.length];
+                                vertices.push(center.x, center.y, center.z);
+                                vertices.push(p1.x, p1.y, p1.z);
+                                vertices.push(p2.x, p2.y, p2.z);
+                            }
+                            planeMesh.geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+                        }
                     }
                 });
                 for (const [plane, mesh] of planeMeshes) {
@@ -271,7 +286,7 @@
                 }
             }
 
-            // Visualize raw 3D Meshes (if supported)
+            // Visualize raw 3D Meshes (if supported by device)
             if (frame.detectedMeshes) {
                 frame.detectedMeshes.forEach(mesh => {
                     let threeMesh = worldMeshes.get(mesh);
@@ -312,7 +327,11 @@
 
                 if (hitTestSourceRequested === false) {
                     session.requestReferenceSpace('viewer').then((viewerSpace) => {
-                        session.requestHitTestSource({ space: viewerSpace }).then((source) => {
+                        // CRITICAL FIX: Add entityTypes to force hitting raw TOF points (bumps) and meshes, not just planes
+                        session.requestHitTestSource({ 
+                            space: viewerSpace,
+                            entityTypes: ['point', 'mesh', 'plane'] 
+                        }).then((source) => {
                             hitTestSource = source;
                         });
                     });
@@ -339,7 +358,7 @@
                         }
                         
                         if (points.length === 0) {
-                            instructionsText.innerText = "Surface detected! Tap to place point 1.";
+                            instructionsText.innerText = "Surface/Object detected! Tap to place point 1.";
                         }
                     } else {
                         reticle.visible = false;
