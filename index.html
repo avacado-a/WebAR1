@@ -11,7 +11,7 @@
         /* Make sure the canvas takes up the full screen */
         canvas { display: block; width: 100vw; height: 100vh; }
         /* AR Button positioning fix */
-        #ARButton { bottom: 20px !important; }
+        #ARButton { bottom: 20px !important; z-index: 50 !important; }
     </style>
     
     <!-- Import map for Three.js -->
@@ -31,8 +31,13 @@
         
         <!-- Header & Instructions -->
         <div class="bg-black/60 backdrop-blur-md text-white p-4 rounded-2xl shadow-lg border border-white/20 pointer-events-auto">
-            <h1 class="text-xl font-bold mb-1">AR Measure</h1>
-            <p id="instructions" class="text-sm text-gray-200">Move phone slowly to detect surfaces...</p>
+            <h1 class="text-xl font-bold mb-1">AR Measure PRO</h1>
+            <p id="instructions" class="text-sm text-gray-200 mb-2">Move phone slowly to build 3D mesh...</p>
+            
+            <!-- Live Distance to Camera -->
+            <div id="live-dist-container" class="text-xs bg-blue-900/50 border border-blue-400/30 p-2 rounded-lg hidden transition-opacity">
+                Camera to point: <span id="live-dist" class="font-mono font-bold text-blue-200">0.00 cm</span>
+            </div>
         </div>
 
         <!-- Measurement Results Panel -->
@@ -67,47 +72,56 @@
         // Measurement State
         let points = [];
         let meshes = [];
-        let measurementGroup = new THREE.Group(); // Group to hold all 3D lines
+        let measurementGroup = new THREE.Group();
+
+        // Visualization Maps for World Mesh/Planes
+        const planeMeshes = new Map();
+        const worldMeshes = new Map();
+        
+        // Materials for environment visualization
+        const planeMaterial = new THREE.LineBasicMaterial({ color: 0x00ff00, transparent: true, opacity: 0.5 });
+        const meshMaterial = new THREE.MeshBasicMaterial({ color: 0x00ffff, wireframe: true, transparent: true, opacity: 0.15 });
 
         const uiOverlay = document.getElementById('overlay');
         const instructionsText = document.getElementById('instructions');
         const resultsPanel = document.getElementById('results');
+        const liveDistContainer = document.getElementById('live-dist-container');
+        const liveDistText = document.getElementById('live-dist');
 
         init();
         animate();
 
         function init() {
-            // Setup Scene
             scene = new THREE.Scene();
             camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
 
-            // Setup Lighting
             const light = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 3);
             scene.add(light);
 
-            // Setup Renderer
             renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
             renderer.setPixelRatio(window.devicePixelRatio);
             renderer.setSize(window.innerWidth, window.innerHeight);
             renderer.xr.enabled = true;
             document.body.appendChild(renderer.domElement);
 
-            // Setup AR Button with WebXR DOM Overlay requirement
+            // Request advanced environmental understanding features
             const arOptions = { 
                 requiredFeatures: ['hit-test'], 
-                optionalFeatures: ['dom-overlay'], 
-                domOverlay: { root: uiOverlay } 
+                optionalFeatures: ['dom-overlay', 'plane-detection', 'mesh-detection', 'depth-sensing'], 
+                domOverlay: { root: uiOverlay },
+                depthSensing: {
+                    usagePreference: ['cpu-optimized', 'gpu-optimized'],
+                    dataFormatPreference: ['luminance-alpha', 'float32']
+                }
             };
             document.body.appendChild(ARButton.createButton(renderer, arOptions));
 
-            // Setup AR Controller
             controller = renderer.xr.getController(0);
             controller.addEventListener('select', onSelect);
             scene.add(controller);
+            scene.add(measurementGroup);
 
-            scene.add(measurementGroup); // Add measurement lines group
-
-            // Create Reticle (the target ball that snaps to surfaces)
+            // Reticle
             const reticleGeometry = new THREE.SphereGeometry(0.015, 32, 32);
             const reticleMaterial = new THREE.MeshBasicMaterial({ color: 0x00aaff, opacity: 0.8, transparent: true });
             reticle = new THREE.Mesh(reticleGeometry, reticleMaterial);
@@ -115,35 +129,34 @@
             reticle.visible = false;
             scene.add(reticle);
 
-            // Event Listeners for UI
+            // UI Listeners
             document.getElementById('reset-btn').addEventListener('click', (e) => {
-                e.stopPropagation(); // Prevent triggering the 3D select event
+                e.stopPropagation();
                 resetMeasurement();
             });
 
             window.addEventListener('resize', onWindowResize);
 
-            // WebXR Session Management
             renderer.xr.addEventListener('sessionstart', () => {
                 uiOverlay.classList.remove('hidden');
                 resetMeasurement();
             });
+            
             renderer.xr.addEventListener('sessionend', () => {
                 uiOverlay.classList.add('hidden');
                 hitTestSourceRequested = false;
                 hitTestSource = null;
+                clearEnvironmentMeshes();
             });
         }
 
         function onSelect() {
             if (reticle.visible) {
-                // If we already have 2 points, clicking again resets everything
                 if (points.length >= 2) {
                     resetMeasurement();
                     return;
                 }
 
-                // Create a small sphere at the reticle's exact current location
                 const geometry = new THREE.SphereGeometry(0.015, 32, 32);
                 const material = new THREE.MeshPhongMaterial({ color: 0x00ff00 });
                 const sphere = new THREE.Mesh(geometry, material);
@@ -154,15 +167,15 @@
                 meshes.push(sphere);
                 points.push(sphere.position.clone());
 
-                // Update UI state
                 if (points.length === 1) {
                     instructionsText.innerText = "Point 1 saved. Move and tap to place Point 2.";
-                    setReticleColor(0xffaa00); // Change reticle color
+                    setReticleColor(0xffaa00);
                 } else if (points.length === 2) {
                     instructionsText.innerText = "Measurement complete. Tap anywhere to reset.";
-                    setReticleColor(0xff0000); // Change reticle color
+                    setReticleColor(0xff0000);
                     drawMeasurementLines(points[0], points[1]);
                     calculateAndDisplay(points[0], points[1]);
+                    liveDistContainer.classList.add('hidden'); // Hide live dist when done
                 }
             }
         }
@@ -172,29 +185,16 @@
         }
 
         function drawMeasurementLines(p1, p2) {
-            // Main direct line (White)
             const geoMain = new THREE.BufferGeometry().setFromPoints([p1, p2]);
-            const matMain = new THREE.LineBasicMaterial({ color: 0xffffff });
+            const matMain = new THREE.LineBasicMaterial({ color: 0xffffff, linewidth: 3 });
             measurementGroup.add(new THREE.Line(geoMain, matMain));
 
-            // Intermediate points for orthogonal path
             const px = new THREE.Vector3(p2.x, p1.y, p1.z);
             const pxy = new THREE.Vector3(p2.x, p2.y, p1.z);
 
-            // X Line (Red)
-            const geoX = new THREE.BufferGeometry().setFromPoints([p1, px]);
-            const matX = new THREE.LineBasicMaterial({ color: 0xff4444 });
-            measurementGroup.add(new THREE.Line(geoX, matX));
-
-            // Y Line (Green)
-            const geoY = new THREE.BufferGeometry().setFromPoints([px, pxy]);
-            const matY = new THREE.LineBasicMaterial({ color: 0x44ff44 });
-            measurementGroup.add(new THREE.Line(geoY, matY));
-
-            // Z Line (Blue)
-            const geoZ = new THREE.BufferGeometry().setFromPoints([pxy, p2]);
-            const matZ = new THREE.LineBasicMaterial({ color: 0x4444ff });
-            measurementGroup.add(new THREE.Line(geoZ, matZ));
+            measurementGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([p1, px]), new THREE.LineBasicMaterial({ color: 0xff4444 })));
+            measurementGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([px, pxy]), new THREE.LineBasicMaterial({ color: 0x44ff44 })));
+            measurementGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([pxy, p2]), new THREE.LineBasicMaterial({ color: 0x4444ff })));
         }
 
         function formatDistance(meters) {
@@ -204,15 +204,12 @@
         }
 
         function calculateAndDisplay(p1, p2) {
-            // Calculate absolute differences across axes
             const dx = Math.abs(p2.x - p1.x);
-            const dy = Math.abs(p2.y - p1.y); // Up/Down relative to start
-            const dz = Math.abs(p2.z - p1.z); // Depth relative to start
-            const totalDist = p1.distanceTo(p2); // True Euclidean distance
+            const dy = Math.abs(p2.y - p1.y);
+            const dz = Math.abs(p2.z - p1.z);
+            const totalDist = p1.distanceTo(p2);
 
-            // Update DOM
             document.getElementById('dist-total').innerText = formatDistance(totalDist);
-            
             document.getElementById('dist-x').innerHTML = `<span>X (Left/Right):</span> <span class="font-mono">${formatDistance(dx)}</span>`;
             document.getElementById('dist-y').innerHTML = `<span>Y (Up/Down):</span> <span class="font-mono">${formatDistance(dy)}</span>`;
             document.getElementById('dist-z').innerHTML = `<span>Z (Depth):</span> <span class="font-mono">${formatDistance(dz)}</span>`;
@@ -222,24 +219,83 @@
 
         function resetMeasurement() {
             points = [];
-            
             meshes.forEach(m => scene.remove(m));
             meshes = [];
-            
-            // Clear all drawn lines
             while(measurementGroup.children.length > 0){ 
                 measurementGroup.remove(measurementGroup.children[0]); 
             }
-            
             instructionsText.innerText = "Aim the reticle at a surface and tap the screen.";
             resultsPanel.classList.add('hidden');
-            setReticleColor(0x00aaff); // Reset to blue
+            liveDistContainer.classList.add('hidden');
+            setReticleColor(0x00aaff);
+        }
+
+        function clearEnvironmentMeshes() {
+            planeMeshes.forEach(mesh => scene.remove(mesh));
+            planeMeshes.clear();
+            worldMeshes.forEach(mesh => scene.remove(mesh));
+            worldMeshes.clear();
         }
 
         function onWindowResize() {
             camera.aspect = window.innerWidth / window.innerHeight;
             camera.updateProjectionMatrix();
             renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function updateEnvironmentVisualization(frame, referenceSpace) {
+            // Visualize Planes (if supported)
+            if (frame.detectedPlanes) {
+                frame.detectedPlanes.forEach(plane => {
+                    let planeLine = planeMeshes.get(plane);
+                    if (!planeLine) {
+                        const geometry = new THREE.BufferGeometry();
+                        planeLine = new THREE.LineLoop(geometry, planeMaterial);
+                        scene.add(planeLine);
+                        planeMeshes.set(plane, planeLine);
+                    }
+                    const pose = frame.getPose(plane.planeSpace, referenceSpace);
+                    if (pose) {
+                        planeLine.matrix.fromArray(pose.transform.matrix);
+                        planeLine.matrixAutoUpdate = false;
+                        const vertices = [];
+                        plane.polygon.forEach(point => vertices.push(point.x, point.y, point.z));
+                        planeLine.geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+                    }
+                });
+                for (const [plane, mesh] of planeMeshes) {
+                    if (!frame.detectedPlanes.has(plane)) {
+                        scene.remove(mesh);
+                        planeMeshes.delete(plane);
+                    }
+                }
+            }
+
+            // Visualize raw 3D Meshes (if supported)
+            if (frame.detectedMeshes) {
+                frame.detectedMeshes.forEach(mesh => {
+                    let threeMesh = worldMeshes.get(mesh);
+                    if (!threeMesh) {
+                        const geometry = new THREE.BufferGeometry();
+                        threeMesh = new THREE.Mesh(geometry, meshMaterial);
+                        scene.add(threeMesh);
+                        worldMeshes.set(mesh, threeMesh);
+                    }
+                    const pose = frame.getPose(mesh.meshSpace, referenceSpace);
+                    if (pose) {
+                        threeMesh.matrix.fromArray(pose.transform.matrix);
+                        threeMesh.matrixAutoUpdate = false;
+                        threeMesh.geometry.setAttribute('position', new THREE.BufferAttribute(mesh.vertices, 3));
+                        threeMesh.geometry.setIndex(new THREE.BufferAttribute(mesh.indices, 1));
+                    }
+                });
+                for (const [mesh, threeMesh] of worldMeshes) {
+                    if (!frame.detectedMeshes.has(mesh)) {
+                        scene.remove(threeMesh);
+                        worldMeshes.delete(mesh);
+                    }
+                }
+            }
         }
 
         function animate() {
@@ -251,21 +307,18 @@
                 const referenceSpace = renderer.xr.getReferenceSpace();
                 const session = renderer.xr.getSession();
 
-                // Request Hit Test Source
+                // Update the transparent world meshes
+                updateEnvironmentVisualization(frame, referenceSpace);
+
                 if (hitTestSourceRequested === false) {
                     session.requestReferenceSpace('viewer').then((viewerSpace) => {
                         session.requestHitTestSource({ space: viewerSpace }).then((source) => {
                             hitTestSource = source;
                         });
                     });
-                    session.addEventListener('end', () => {
-                        hitTestSourceRequested = false;
-                        hitTestSource = null;
-                    });
                     hitTestSourceRequested = true;
                 }
 
-                // Process Hit Test
                 if (hitTestSource) {
                     const hitTestResults = frame.getHitTestResults(hitTestSource);
                     if (hitTestResults.length > 0) {
@@ -275,11 +328,22 @@
                         reticle.visible = true;
                         reticle.matrix.fromArray(pose.transform.matrix);
                         
+                        // Calculate Live Distance to Camera
+                        if (points.length < 2) {
+                            const cameraPos = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
+                            const reticlePos = new THREE.Vector3().setFromMatrixPosition(reticle.matrix);
+                            const distToCamera = cameraPos.distanceTo(reticlePos);
+                            
+                            liveDistText.innerText = formatDistance(distToCamera);
+                            liveDistContainer.classList.remove('hidden');
+                        }
+                        
                         if (points.length === 0) {
                             instructionsText.innerText = "Surface detected! Tap to place point 1.";
                         }
                     } else {
                         reticle.visible = false;
+                        liveDistContainer.classList.add('hidden');
                         if (points.length === 0) {
                             instructionsText.innerText = "Looking for surfaces. Move your phone slowly...";
                         }
