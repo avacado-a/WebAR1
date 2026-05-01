@@ -31,12 +31,18 @@
         
         <!-- Header & Instructions -->
         <div class="bg-black/60 backdrop-blur-md text-white p-4 rounded-2xl shadow-lg border border-white/20 pointer-events-auto">
-            <h1 class="text-xl font-bold mb-1">AR Measure PRO</h1>
-            <p id="instructions" class="text-sm text-gray-200 mb-2">Move phone slowly to scan surfaces...</p>
+            <div class="flex justify-between items-start mb-1">
+                <h1 class="text-xl font-bold">AR Measure PRO</h1>
+                <!-- Hardware capability indicator -->
+                <span id="sensor-status" class="text-[10px] px-2 py-1 bg-yellow-500/20 text-yellow-300 border border-yellow-500/50 rounded-full font-semibold">
+                    Initializing...
+                </span>
+            </div>
+            <p id="instructions" class="text-sm text-gray-200 mb-2">Aim center of screen at any object...</p>
             
             <!-- Live Distance to Camera -->
             <div id="live-dist-container" class="text-xs bg-blue-900/50 border border-blue-400/30 p-2 rounded-lg hidden transition-opacity">
-                Camera to point: <span id="live-dist" class="font-mono font-bold text-blue-200">0.00 cm</span>
+                Camera to object: <span id="live-dist" class="font-mono font-bold text-blue-200">0.00 cm</span>
             </div>
         </div>
 
@@ -68,26 +74,19 @@
         let controller, reticle;
         let hitTestSource = null;
         let hitTestSourceRequested = false;
+        let depthApiActive = false;
 
         // Measurement State
         let points = [];
         let meshes = [];
         let measurementGroup = new THREE.Group();
 
-        // Visualization Maps for World Mesh/Planes
-        const planeMeshes = new Map();
-        const worldMeshes = new Map();
-        
-        // Materials for environment visualization
-        // Changed planes to a subtle solid surface, and made meshes highly visible
-        const planeMaterial = new THREE.MeshBasicMaterial({ color: 0x00ff00, transparent: true, opacity: 0.15, side: THREE.DoubleSide });
-        const meshMaterial = new THREE.MeshBasicMaterial({ color: 0x00ffff, wireframe: true, transparent: true, opacity: 0.8, side: THREE.DoubleSide });
-
         const uiOverlay = document.getElementById('overlay');
         const instructionsText = document.getElementById('instructions');
         const resultsPanel = document.getElementById('results');
         const liveDistContainer = document.getElementById('live-dist-container');
         const liveDistText = document.getElementById('live-dist');
+        const sensorStatus = document.getElementById('sensor-status');
 
         init();
         animate();
@@ -105,10 +104,10 @@
             renderer.xr.enabled = true;
             document.body.appendChild(renderer.domElement);
 
-            // Request advanced environmental understanding features
+            // Request Depth Sensing API explicitly
             const arOptions = { 
                 requiredFeatures: ['hit-test'], 
-                optionalFeatures: ['dom-overlay', 'plane-detection', 'mesh-detection', 'depth-sensing'], 
+                optionalFeatures: ['dom-overlay', 'depth-sensing'], 
                 domOverlay: { root: uiOverlay },
                 depthSensing: {
                     usagePreference: ['cpu-optimized', 'gpu-optimized'],
@@ -122,11 +121,11 @@
             scene.add(controller);
             scene.add(measurementGroup);
 
-            // Reticle
+            // Reticle (Ball) - matrixAutoUpdate is TRUE so we can manually set position
             const reticleGeometry = new THREE.SphereGeometry(0.015, 32, 32);
             const reticleMaterial = new THREE.MeshBasicMaterial({ color: 0x00aaff, opacity: 0.8, transparent: true });
             reticle = new THREE.Mesh(reticleGeometry, reticleMaterial);
-            reticle.matrixAutoUpdate = false;
+            reticle.matrixAutoUpdate = true; 
             reticle.visible = false;
             scene.add(reticle);
 
@@ -140,6 +139,8 @@
 
             renderer.xr.addEventListener('sessionstart', () => {
                 uiOverlay.classList.remove('hidden');
+                sensorStatus.className = "text-[10px] px-2 py-1 bg-yellow-500/20 text-yellow-300 border border-yellow-500/50 rounded-full font-semibold";
+                sensorStatus.innerText = "Hit-Test Fallback";
                 resetMeasurement();
             });
             
@@ -147,7 +148,7 @@
                 uiOverlay.classList.add('hidden');
                 hitTestSourceRequested = false;
                 hitTestSource = null;
-                clearEnvironmentMeshes();
+                depthApiActive = false;
             });
         }
 
@@ -162,14 +163,14 @@
                 const material = new THREE.MeshPhongMaterial({ color: 0x00ff00 });
                 const sphere = new THREE.Mesh(geometry, material);
                 
-                sphere.position.setFromMatrixPosition(reticle.matrix);
+                sphere.position.copy(reticle.position);
                 scene.add(sphere);
                 
                 meshes.push(sphere);
                 points.push(sphere.position.clone());
 
                 if (points.length === 1) {
-                    instructionsText.innerText = "Point 1 saved. Move and tap to place Point 2.";
+                    instructionsText.innerText = "Point 1 saved. Aim and tap to place Point 2.";
                     setReticleColor(0xffaa00);
                 } else if (points.length === 2) {
                     instructionsText.innerText = "Measurement complete. Tap anywhere to reset.";
@@ -225,92 +226,16 @@
             while(measurementGroup.children.length > 0){ 
                 measurementGroup.remove(measurementGroup.children[0]); 
             }
-            instructionsText.innerText = "Aim the reticle at a surface and tap the screen.";
+            instructionsText.innerText = "Aim the center of screen at an object and tap.";
             resultsPanel.classList.add('hidden');
             liveDistContainer.classList.add('hidden');
             setReticleColor(0x00aaff);
-        }
-
-        function clearEnvironmentMeshes() {
-            planeMeshes.forEach(mesh => scene.remove(mesh));
-            planeMeshes.clear();
-            worldMeshes.forEach(mesh => scene.remove(mesh));
-            worldMeshes.clear();
         }
 
         function onWindowResize() {
             camera.aspect = window.innerWidth / window.innerHeight;
             camera.updateProjectionMatrix();
             renderer.setSize(window.innerWidth, window.innerHeight);
-        }
-
-        function updateEnvironmentVisualization(frame, referenceSpace) {
-            // Visualize Planes as solid, subtle green surfaces
-            if (frame.detectedPlanes) {
-                frame.detectedPlanes.forEach(plane => {
-                    let planeMesh = planeMeshes.get(plane);
-                    if (!planeMesh) {
-                        const geometry = new THREE.BufferGeometry();
-                        planeMesh = new THREE.Mesh(geometry, planeMaterial);
-                        scene.add(planeMesh);
-                        planeMeshes.set(plane, planeMesh);
-                    }
-                    const pose = frame.getPose(plane.planeSpace, referenceSpace);
-                    if (pose) {
-                        planeMesh.matrix.fromArray(pose.transform.matrix);
-                        planeMesh.matrixAutoUpdate = false;
-                        
-                        // Triangulate the plane polygon into a solid shape
-                        const vertices = [];
-                        const center = { x: 0, y: 0, z: 0 };
-                        if (plane.polygon.length > 0) {
-                            plane.polygon.forEach(p => { center.x += p.x; center.y += p.y; center.z += p.z; });
-                            center.x /= plane.polygon.length; center.y /= plane.polygon.length; center.z /= plane.polygon.length;
-                            
-                            for (let i = 0; i < plane.polygon.length; i++) {
-                                const p1 = plane.polygon[i];
-                                const p2 = plane.polygon[(i + 1) % plane.polygon.length];
-                                vertices.push(center.x, center.y, center.z);
-                                vertices.push(p1.x, p1.y, p1.z);
-                                vertices.push(p2.x, p2.y, p2.z);
-                            }
-                            planeMesh.geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
-                        }
-                    }
-                });
-                for (const [plane, mesh] of planeMeshes) {
-                    if (!frame.detectedPlanes.has(plane)) {
-                        scene.remove(mesh);
-                        planeMeshes.delete(plane);
-                    }
-                }
-            }
-
-            // Visualize raw 3D Meshes (if supported by device)
-            if (frame.detectedMeshes) {
-                frame.detectedMeshes.forEach(mesh => {
-                    let threeMesh = worldMeshes.get(mesh);
-                    if (!threeMesh) {
-                        const geometry = new THREE.BufferGeometry();
-                        threeMesh = new THREE.Mesh(geometry, meshMaterial);
-                        scene.add(threeMesh);
-                        worldMeshes.set(mesh, threeMesh);
-                    }
-                    const pose = frame.getPose(mesh.meshSpace, referenceSpace);
-                    if (pose) {
-                        threeMesh.matrix.fromArray(pose.transform.matrix);
-                        threeMesh.matrixAutoUpdate = false;
-                        threeMesh.geometry.setAttribute('position', new THREE.BufferAttribute(mesh.vertices, 3));
-                        threeMesh.geometry.setIndex(new THREE.BufferAttribute(mesh.indices, 1));
-                    }
-                });
-                for (const [mesh, threeMesh] of worldMeshes) {
-                    if (!frame.detectedMeshes.has(mesh)) {
-                        scene.remove(threeMesh);
-                        worldMeshes.delete(mesh);
-                    }
-                }
-            }
         }
 
         function animate() {
@@ -322,51 +247,84 @@
                 const referenceSpace = renderer.xr.getReferenceSpace();
                 const session = renderer.xr.getSession();
 
-                // Update the transparent world meshes
-                updateEnvironmentVisualization(frame, referenceSpace);
-
+                // Setup fallback hit-test source
                 if (hitTestSourceRequested === false) {
                     session.requestReferenceSpace('viewer').then((viewerSpace) => {
-                        // CRITICAL FIX: Add entityTypes to force hitting raw TOF points (bumps) and meshes, not just planes
-                        session.requestHitTestSource({ 
-                            space: viewerSpace,
-                            entityTypes: ['point', 'mesh', 'plane'] 
-                        }).then((source) => {
+                        session.requestHitTestSource({ space: viewerSpace }).then((source) => {
                             hitTestSource = source;
                         });
                     });
                     hitTestSourceRequested = true;
                 }
 
-                if (hitTestSource) {
+                let hasValidPlacement = false;
+                let distanceToPoint = 0;
+
+                // METHOD 1: Try reading RAW Depth Buffer (Highest Precision for objects/verticals)
+                const viewerPose = frame.getViewerPose(referenceSpace);
+                if (viewerPose && viewerPose.views.length > 0) {
+                    try {
+                        const view = viewerPose.views[0];
+                        const depthInfo = frame.getDepthInformation(view);
+                        
+                        if (depthInfo) {
+                            // Get distance to the exact center pixel of the screen
+                            const depth = depthInfo.getDepthInMeters(0.5, 0.5);
+                            
+                            if (depth > 0.01 && depth < 20) { // Valid data check
+                                if (!depthApiActive) {
+                                    depthApiActive = true;
+                                    sensorStatus.className = "text-[10px] px-2 py-1 bg-green-500/20 text-green-300 border border-green-500/50 rounded-full font-semibold";
+                                    sensorStatus.innerText = "TOF Sensor Active";
+                                }
+
+                                // Project a point straight forward from the camera
+                                const camPos = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
+                                const camRot = new THREE.Matrix4().extractRotation(camera.matrixWorld);
+                                const camDir = new THREE.Vector3(0, 0, -1).applyMatrix4(camRot).normalize();
+                                
+                                reticle.position.copy(camPos).add(camDir.multiplyScalar(depth));
+                                reticle.quaternion.copy(camera.quaternion); // Face camera
+                                reticle.visible = true;
+                                
+                                hasValidPlacement = true;
+                                distanceToPoint = depth;
+                            }
+                        }
+                    } catch(e) {
+                        // Depth reading failed this frame, ignore and fallback
+                    }
+                }
+
+                // METHOD 2: Fallback to standard ARCore Hit-Test if depth map isn't available
+                if (!hasValidPlacement && hitTestSource) {
                     const hitTestResults = frame.getHitTestResults(hitTestSource);
                     if (hitTestResults.length > 0) {
                         const hit = hitTestResults[0];
                         const pose = hit.getPose(referenceSpace);
 
-                        reticle.visible = true;
+                        // Extract position out of the matrix
                         reticle.matrix.fromArray(pose.transform.matrix);
+                        reticle.matrix.decompose(reticle.position, reticle.quaternion, reticle.scale);
+                        reticle.visible = true;
                         
-                        // Calculate Live Distance to Camera
-                        if (points.length < 2) {
-                            const cameraPos = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
-                            const reticlePos = new THREE.Vector3().setFromMatrixPosition(reticle.matrix);
-                            const distToCamera = cameraPos.distanceTo(reticlePos);
-                            
-                            liveDistText.innerText = formatDistance(distToCamera);
-                            liveDistContainer.classList.remove('hidden');
-                        }
-                        
-                        if (points.length === 0) {
-                            instructionsText.innerText = "Surface/Object detected! Tap to place point 1.";
-                        }
-                    } else {
-                        reticle.visible = false;
-                        liveDistContainer.classList.add('hidden');
-                        if (points.length === 0) {
-                            instructionsText.innerText = "Looking for surfaces. Move your phone slowly...";
-                        }
+                        hasValidPlacement = true;
+                        const camPos = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
+                        distanceToPoint = camPos.distanceTo(reticle.position);
                     }
+                }
+
+                // Update UI based on success
+                if (hasValidPlacement) {
+                    if (points.length < 2) {
+                        liveDistText.innerText = formatDistance(distanceToPoint);
+                        liveDistContainer.classList.remove('hidden');
+                        if (points.length === 0) instructionsText.innerText = "Surface detected! Tap to place point 1.";
+                    }
+                } else {
+                    reticle.visible = false;
+                    liveDistContainer.classList.add('hidden');
+                    if (points.length === 0) instructionsText.innerText = "Looking for depth data...";
                 }
             }
             renderer.render(scene, camera);
