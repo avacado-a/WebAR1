@@ -42,10 +42,10 @@
                 <div id="dist-total" class="text-3xl font-bold text-green-400">0.00 cm</div>
             </div>
             
-            <div class="grid grid-cols-1 gap-2 text-sm text-gray-300 bg-white/5 p-3 rounded-xl border border-white/10">
-                <div id="dist-x" class="flex justify-between"><span>X (Left/Right):</span> <span>0.00 cm</span></div>
-                <div id="dist-y" class="flex justify-between"><span>Y (Up/Down):</span> <span>0.00 cm</span></div>
-                <div id="dist-z" class="flex justify-between"><span>Z (Depth):</span> <span>0.00 cm</span></div>
+            <div class="grid grid-cols-1 gap-2 text-sm text-gray-300 bg-white/5 p-3 rounded-xl border border-white/10 font-medium">
+                <div id="dist-x" class="flex justify-between text-red-400"><span>X (Left/Right):</span> <span>0.00 cm</span></div>
+                <div id="dist-y" class="flex justify-between text-green-400"><span>Y (Up/Down):</span> <span>0.00 cm</span></div>
+                <div id="dist-z" class="flex justify-between text-blue-400"><span>Z (Depth):</span> <span>0.00 cm</span></div>
             </div>
 
             <button id="reset-btn" class="mt-4 w-full bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-4 rounded-xl transition-colors">
@@ -67,7 +67,7 @@
         // Measurement State
         let points = [];
         let meshes = [];
-        let lineMesh = null;
+        let measurementGroup = new THREE.Group(); // Group to hold all 3D lines
 
         const uiOverlay = document.getElementById('overlay');
         const instructionsText = document.getElementById('instructions');
@@ -105,10 +105,12 @@
             controller.addEventListener('select', onSelect);
             scene.add(controller);
 
-            // Create Reticle (the target ring that snaps to surfaces)
-            const ringGeometry = new THREE.RingGeometry(0.04, 0.05, 32).rotateX(-Math.PI / 2);
-            const ringMaterial = new THREE.MeshBasicMaterial({ color: 0x00aaff });
-            reticle = new THREE.Mesh(ringGeometry, ringMaterial);
+            scene.add(measurementGroup); // Add measurement lines group
+
+            // Create Reticle (the target ball that snaps to surfaces)
+            const reticleGeometry = new THREE.SphereGeometry(0.015, 32, 32);
+            const reticleMaterial = new THREE.MeshBasicMaterial({ color: 0x00aaff, opacity: 0.8, transparent: true });
+            reticle = new THREE.Mesh(reticleGeometry, reticleMaterial);
             reticle.matrixAutoUpdate = false;
             reticle.visible = false;
             scene.add(reticle);
@@ -155,25 +157,44 @@
                 // Update UI state
                 if (points.length === 1) {
                     instructionsText.innerText = "Point 1 saved. Move and tap to place Point 2.";
-                    ringMaterialColor(0xffaa00); // Change reticle color
+                    setReticleColor(0xffaa00); // Change reticle color
                 } else if (points.length === 2) {
                     instructionsText.innerText = "Measurement complete. Tap anywhere to reset.";
-                    ringMaterialColor(0xff0000); // Change reticle color
-                    drawLine(points[0], points[1]);
+                    setReticleColor(0xff0000); // Change reticle color
+                    drawMeasurementLines(points[0], points[1]);
                     calculateAndDisplay(points[0], points[1]);
                 }
             }
         }
 
-        function ringMaterialColor(hex) {
+        function setReticleColor(hex) {
             reticle.material.color.setHex(hex);
         }
 
-        function drawLine(p1, p2) {
-            const geometry = new THREE.BufferGeometry().setFromPoints([p1, p2]);
-            const material = new THREE.LineBasicMaterial({ color: 0x00ff00, linewidth: 5 });
-            lineMesh = new THREE.Line(geometry, material);
-            scene.add(lineMesh);
+        function drawMeasurementLines(p1, p2) {
+            // Main direct line (White)
+            const geoMain = new THREE.BufferGeometry().setFromPoints([p1, p2]);
+            const matMain = new THREE.LineBasicMaterial({ color: 0xffffff });
+            measurementGroup.add(new THREE.Line(geoMain, matMain));
+
+            // Intermediate points for orthogonal path
+            const px = new THREE.Vector3(p2.x, p1.y, p1.z);
+            const pxy = new THREE.Vector3(p2.x, p2.y, p1.z);
+
+            // X Line (Red)
+            const geoX = new THREE.BufferGeometry().setFromPoints([p1, px]);
+            const matX = new THREE.LineBasicMaterial({ color: 0xff4444 });
+            measurementGroup.add(new THREE.Line(geoX, matX));
+
+            // Y Line (Green)
+            const geoY = new THREE.BufferGeometry().setFromPoints([px, pxy]);
+            const matY = new THREE.LineBasicMaterial({ color: 0x44ff44 });
+            measurementGroup.add(new THREE.Line(geoY, matY));
+
+            // Z Line (Blue)
+            const geoZ = new THREE.BufferGeometry().setFromPoints([pxy, p2]);
+            const matZ = new THREE.LineBasicMaterial({ color: 0x4444ff });
+            measurementGroup.add(new THREE.Line(geoZ, matZ));
         }
 
         function formatDistance(meters) {
@@ -192,9 +213,9 @@
             // Update DOM
             document.getElementById('dist-total').innerText = formatDistance(totalDist);
             
-            document.getElementById('dist-x').innerHTML = `<span>X (Left/Right):</span> <span class="font-mono text-blue-300">${formatDistance(dx)}</span>`;
-            document.getElementById('dist-y').innerHTML = `<span>Y (Up/Down):</span> <span class="font-mono text-blue-300">${formatDistance(dy)}</span>`;
-            document.getElementById('dist-z').innerHTML = `<span>Z (Depth):</span> <span class="font-mono text-blue-300">${formatDistance(dz)}</span>`;
+            document.getElementById('dist-x').innerHTML = `<span>X (Left/Right):</span> <span class="font-mono">${formatDistance(dx)}</span>`;
+            document.getElementById('dist-y').innerHTML = `<span>Y (Up/Down):</span> <span class="font-mono">${formatDistance(dy)}</span>`;
+            document.getElementById('dist-z').innerHTML = `<span>Z (Depth):</span> <span class="font-mono">${formatDistance(dz)}</span>`;
             
             resultsPanel.classList.remove('hidden');
         }
@@ -205,14 +226,14 @@
             meshes.forEach(m => scene.remove(m));
             meshes = [];
             
-            if (lineMesh) {
-                scene.remove(lineMesh);
-                lineMesh = null;
+            // Clear all drawn lines
+            while(measurementGroup.children.length > 0){ 
+                measurementGroup.remove(measurementGroup.children[0]); 
             }
             
             instructionsText.innerText = "Aim the reticle at a surface and tap the screen.";
             resultsPanel.classList.add('hidden');
-            ringMaterialColor(0x00aaff); // Reset to blue
+            setReticleColor(0x00aaff); // Reset to blue
         }
 
         function onWindowResize() {
